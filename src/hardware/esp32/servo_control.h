@@ -16,9 +16,8 @@
  */
 
 // SG90 servo timing constants (ESP32 LEDC, 16-bit, 50 Hz)
-constexpr uint32_t SERVO_FREQ         = 50;       // 50 Hz PWM
-constexpr uint8_t  LEDC_CHANNEL       = 0;
-constexpr uint8_t  LEDC_RESOLUTION    = 16;       // 16-bit
+constexpr uint32_t SERVO_FREQ      = 50;    // 50 Hz PWM
+constexpr uint8_t  LEDC_RESOLUTION = 16;    // 16-bit
 
 // Pulse widths for SG90
 constexpr uint32_t PULSE_0_DEG    = 544;   // µs
@@ -49,13 +48,10 @@ public:
   /**
    * @brief Attach LEDC PWM to the given pin.
    * @param pin  GPIO pin for servo signal wire.
-   * @param channel LEDC channel (0-7). Defaults to 0.
    */
-  void begin(int pin, uint8_t channel = LEDC_CHANNEL) {
+  void begin(int pin) {
     _pin = pin;
-    _channel = channel;
-    ledcSetup(_channel, SERVO_FREQ, LEDC_RESOLUTION);
-    ledcAttachPin(_pin, _channel);
+    ledcAttach(pin, SERVO_FREQ, LEDC_RESOLUTION);
     setAngle(90);  // start at centre
   }
 
@@ -66,7 +62,7 @@ public:
   void setAngle(int angle) {
     angle = constrain(angle, 0, MAX_ANGLE);
     uint32_t duty = DUTY_0_DEG + (DUTY_RANGE * angle) / MAX_ANGLE;
-    ledcWrite(_channel, duty);
+    ledcWrite(_pin, duty);
     _currentAngle = angle;
   }
 
@@ -74,12 +70,11 @@ public:
   int getCurrentAngle() const { return _currentAngle; }
 
   /** @brief Detach servo PWM from its pin. */
-  void detach() { ledcDetachPin(_pin); }
+  void detach() { ledcDetach(_pin); }
 
 private:
-  int      _pin;
-  uint8_t  _channel;
-  int      _currentAngle;
+  int  _pin;
+  int  _currentAngle;
 };
 
 #endif  // SERVO_CONTROL_H

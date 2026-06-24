@@ -25,9 +25,9 @@
 #include "servo_control.h"
 
 // Pin assignments
-constexpr uint8_t PIN_GREEN_LED = 26;
-constexpr uint8_t PIN_RED_LED   = 27;
-constexpr uint8_t PIN_SERVO     = 13;
+constexpr uint8_t PIN_GREEN_LED = 02;
+constexpr uint8_t PIN_RED_LED   = 05;
+constexpr uint8_t PIN_SERVO     = 14;
 
 // Serial
 constexpr unsigned long SERIAL_BAUD = 9600;
