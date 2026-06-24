@@ -1,0 +1,6 @@
+# Training-only dependencies (not needed in production inference)
+# Production uses tensorflow-cpu (added in a separate PR).
+tensorflow>=2.13
+scikit-learn>=1.2
+pillow>=9.0
+numpy>=1.24
