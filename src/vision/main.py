@@ -4,11 +4,20 @@ Captures frames from a camera, runs bottle classification, draws
 bounding boxes on a live preview window, and dispatches results over
 USB serial to the ESP32.
 
+Two classifier modes (selectable via ``--tf``):
+
+- **OpenCV DNN** (default): MobileNet SSD Caffe model, VOC class 5,
+  bounding-box based. Falls back gracefully if model files are absent.
+- **TensorFlow** (``--tf``): custom 3-class MobileNetV2 classifier,
+  no bounding box, type-aware labels (Pool Verde / Hatsu Morado).
+
 Usage::
 
-    python -m src.vision.main                     # camera + serial + display
-    python -m src.vision.main --test               # no serial, no display
-    python -m src.vision.main --test --display     # no serial, with display
+    python -m src.vision.main                             # OpenCV DNN
+    python -m src.vision.main --tf                         # TF classifier
+    python -m src.vision.main --tf --model path/to/model.h5
+    python -m src.vision.main --test                       # no serial, no display
+    python -m src.vision.main --tf --test                  # TF test mode
 
 Press ``q`` or ``ESC`` in the preview window, or ``Ctrl+C`` in the
 terminal to stop.
@@ -22,7 +31,7 @@ import cv2
 import serial
 import serial.tools.list_ports
 
-from src.protocol.message import encode
+from src.protocol.message import encode, BottleType
 from src.vision.capture import CameraCapture
 from src.vision.classifier import BottleClassifier
 
@@ -34,6 +43,7 @@ _SERIAL_TIMEOUT = 1.0
 _MODEL_DIR = "models"
 _CAFFEMODEL = f"{_MODEL_DIR}/MobileNetSSD_deploy.caffemodel"
 _PROTOTXT = f"{_MODEL_DIR}/MobileNetSSD_deploy.prototxt"
+_TF_DEFAULT_MODEL = f"{_MODEL_DIR}/bottle_classifier.h5"
 
 _WINDOW_NAME = "Bottle Detection"
 
@@ -107,6 +117,17 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Run inference every N frames (default 2 = ~2× display FPS)",
     )
+    parser.add_argument(
+        "--tf",
+        action="store_true",
+        help="Use TensorFlow classifier instead of OpenCV DNN",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        metavar="PATH",
+        help="Path to TF .h5 model (default: {})".format(_TF_DEFAULT_MODEL),
+    )
     return parser
 
 
@@ -116,6 +137,7 @@ def _draw_overlay(
     confidence: float,
     box: tuple[int, int, int, int] | None,
     fps: float = 0.0,
+    class_name: str | None = None,
 ) -> cv2.Mat:
     """Annotate *frame* with bounding box, label, confidence and FPS.
 
@@ -125,13 +147,15 @@ def _draw_overlay(
         confidence: Confidence score.
         box: ``(x1, y1, x2, y2)`` bounding box or ``None``.
         fps: Current frames-per-second for the overlay.
+        class_name: Display label (e.g. "Pool Verde"). If ``None``,
+            falls back to "BOTTLE" / "NO BOTTLE".
 
     Returns:
         The annotated frame (same object as *frame*).
 
     """
     color = _COLOR_GREEN if is_bottle else _COLOR_RED
-    label = "BOTTLE" if is_bottle else "NO BOTTLE"
+    label = class_name or ("BOTTLE" if is_bottle else "NO BOTTLE")
     text = f"{label}  {confidence:.1%}"
 
     # --- Bounding box ---
@@ -203,6 +227,12 @@ def _open_serial(port: str | None) -> serial.Serial | None:
 def run(args: argparse.Namespace) -> None:
     """Main classification loop with live preview & throttled logging.
 
+    Supports two classifier modes selected via ``--tf``:
+
+    - **OpenCV DNN** (default): returns ``(is_bottle, confidence, box)``.
+    - **TensorFlow** (``--tf``): returns ``BottlePrediction`` with class
+      name and type info.
+
     Inference is only run every *inference_skip* frames (default 2) to
     keep the display smooth.  The last inference result is shown on
     intermediate frames.
@@ -220,10 +250,24 @@ def run(args: argparse.Namespace) -> None:
     if skip > 1:
         _LOG.info("Inference skip=%d — display runs faster, inference every %d frames", skip, skip)
 
-    _LOG.info("Loading model (threshold=%.2f) ...", args.threshold)
-    classifier = BottleClassifier(threshold=args.threshold)
-    classifier.load_model(_CAFFEMODEL, _PROTOTXT)
-    _LOG.info("Model loaded successfully.")
+    # ------------------------------------------------------------------
+    # Classifier initialisation
+    # ------------------------------------------------------------------
+    use_tf = args.tf
+
+    if use_tf:
+        model_path = args.model or _TF_DEFAULT_MODEL
+        _LOG.info("Loading TF model (threshold=%.2f) from %s ...", args.threshold, model_path)
+        from src.vision.classifier_tf import BottleTFClassifier  # noqa: late import
+        classifier = BottleTFClassifier(model_path=model_path, threshold=args.threshold)
+        _LOG.info("TF model loaded successfully.")
+        classifier_type = "tf"
+    else:
+        _LOG.info("Loading OpenCV DNN model (threshold=%.2f) ...", args.threshold)
+        classifier = BottleClassifier(threshold=args.threshold)
+        classifier.load_model(_CAFFEMODEL, _PROTOTXT)
+        _LOG.info("OpenCV DNN model loaded successfully.")
+        classifier_type = "dnn"
 
     serial_port: serial.Serial | None = None if args.test else _open_serial(args.port)
     if serial_port is None and not args.test:
@@ -241,11 +285,17 @@ def run(args: argparse.Namespace) -> None:
     last_log_time = 0.0
 
     # Last classification result (reused on skipped frames)
-    infer_result: tuple[bool, float, tuple[int, int, int, int] | None] = (False, 0.0, None)
+    # Type varies by classifier — initialise with a safe "no detection" value
+    if use_tf:
+        from src.vision.classifier_tf import BottlePrediction  # noqa: late import
+        infer_result = BottlePrediction(class_id=0, confidence=0.0, class_name="No bottle")
+    else:
+        infer_result = (False, 0.0, None)
 
     with CameraCapture(source=args.camera) as camera:
         _LOG.info(
-            "Camera opened (640x480). %s",
+            "Camera opened (640x480). Using %s classifier. %s",
+            classifier_type,
             "Live preview active — press Q or ESC to quit."
             if show_display else "Running headless. Press Ctrl+C to stop.",
         )
@@ -272,17 +322,29 @@ def run(args: argparse.Namespace) -> None:
             if run_inference:
                 infer_result = classifier.predict(frame)
 
-            is_bottle, confidence, box = infer_result
+            # --- Unpack result by classifier type ---
+            if classifier_type == "tf":
+                pred = infer_result
+                is_bottle = pred.class_id != 0
+                confidence = pred.confidence
+                bottle_type = pred.class_id  # class_id matches BottleType
+                class_name = pred.class_name
+                box = None  # TF classifier has no bounding box
+            else:
+                is_bottle, confidence, box = infer_result
+                bottle_type = int(is_bottle)  # 1 for any bottle, 0 for none
+                class_name = None
+
             servo_angle = 90 if is_bottle else 180
-            label = "BOTTLE" if is_bottle else "NOT BOTTLE"
 
             # --- Throttled logging ---
             now = tick
             state_changed = is_bottle != last_bottle_state
             if state_changed or (now - last_log_time) >= _LOG_INTERVAL:
+                label = class_name or ("BOTTLE" if is_bottle else "NOT BOTTLE")
                 _LOG.info(
-                    "%s (confidence=%.3f) servo=%d°%s",
-                    label, confidence, servo_angle,
+                    "%s (confidence=%.3f) servo=%d° type=%d%s",
+                    label, confidence, servo_angle, bottle_type,
                     f" box={box}" if box else "",
                 )
                 last_log_time = now
@@ -290,7 +352,10 @@ def run(args: argparse.Namespace) -> None:
 
             # --- Live preview ---
             if show_display:
-                display = _draw_overlay(frame, is_bottle, confidence, box, fps_ema)
+                display = _draw_overlay(
+                    frame, is_bottle, confidence, box, fps_ema,
+                    class_name=class_name,
+                )
                 cv2.imshow(_WINDOW_NAME, display)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
@@ -299,7 +364,7 @@ def run(args: argparse.Namespace) -> None:
 
             # --- Serial dispatch (only on inference frames) ---
             if run_inference and not args.test:
-                message = encode(is_bottle, servo_angle=servo_angle)
+                message = encode(is_bottle, bottle_type=bottle_type, servo_angle=servo_angle)
                 if serial_port is not None:
                     try:
                         serial_port.write(message)

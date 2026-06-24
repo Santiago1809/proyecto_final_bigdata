@@ -1,176 +1,216 @@
-"""Tests for BottleClassifier prediction, bounding box, and threshold.
+"""Tests for BottleTFClassifier prediction, threshold, and enum mapping.
 
-Uses a mock OpenCV DNN net to produce controlled detection outputs
-at various confidence levels, verifying the classification decision
-flips at the configured threshold and bounding box coordinates are
-returned correctly.
+Uses a mock ``tf.keras.Model`` to produce controlled softmax outputs
+at various confidence levels, verifying:
 
-Test strategy:
-  - Threshold 0.7: confidence 0.6 → NOT bottle, 0.7 → bottle, 0.8 → bottle
-  - Threshold 0.6: confidence 0.59 → NOT bottle, 0.61 → bottle
-  - Threshold 0.8: confidence 0.79 → NOT bottle, 0.81 → bottle
-  - Bounding box is returned as a 4-tuple when detected, None otherwise
+  - Predicted class id, name, and confidence match expected values.
+  - Threshold boundary: confidence below threshold is downgraded to
+    class 0 (no bottle).
+  - ``BottleType`` enum values correspond to class indices.
+  - Invalid threshold values are rejected.
+
+All tests mock ``tf.keras.models.load_model`` so no real model file
+or GPU is required.
 """
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from src.vision.classifier import BottleClassifier
+from src.vision.classifier_tf import BottlePrediction, BottleTFClassifier, BottleType
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
-def _make_detection(
-    class_id: int, confidence: float,
-    x1: float = 0.1, y1: float = 0.1, x2: float = 0.5, y2: float = 0.5,
-) -> np.ndarray:
-    """Build a single-detection array shaped (1, 1, 1, 7).
+def _make_softmax_probs(top_class: int, top_confidence: float, num_classes: int = 3) -> np.ndarray:
+    """Build a (1, num_classes) softmax-like probability vector.
 
-    Format: [img_id, class_id, confidence, x1, y1, x2, y2]
-    Coordinates are normalised [0, 1] relative to the 300×300 DNN input.
+    The *top_class* receives *top_confidence* probability; the remainder
+    is distributed evenly among the other classes.
     """
-    detection = np.zeros((1, 1, 1, 7), dtype=np.float32)
-    detection[0, 0, 0, 0] = 0          # img_id (unused)
-    detection[0, 0, 0, 1] = float(class_id)
-    detection[0, 0, 0, 2] = float(confidence)
-    detection[0, 0, 0, 3] = float(x1)
-    detection[0, 0, 0, 4] = float(y1)
-    detection[0, 0, 0, 5] = float(x2)
-    detection[0, 0, 0, 6] = float(y2)
-    return detection
+    probs = np.ones((1, num_classes), dtype=np.float32) * ((1.0 - top_confidence) / (num_classes - 1))
+    probs[0, top_class] = top_confidence
+    return probs
 
 
-class TestBottleClassifierThreshold(unittest.TestCase):
-    """Threshold boundary tests using a mock DNN net."""
+def _make_mock_model(return_probs: np.ndarray | None = None) -> MagicMock:
+    """Create a mock Keras model with a controllable ``__call__`` return."""
+    model = MagicMock()
+    if return_probs is not None:
+        import tensorflow as tf
+        model.__call__.return_value = tf.constant(return_probs)
+    return model
 
-    FRAME_H = 480
-    FRAME_W = 640
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestBottleType(unittest.TestCase):
+    """BottleType enum values and mapping."""
+
+    def test_enum_values(self):
+        """BottleType has correct int values matching class indices."""
+        self.assertEqual(BottleType.NONE, 0)
+        self.assertEqual(BottleType.POOL_VERDE, 1)
+        self.assertEqual(BottleType.HATSU_MORADO, 2)
+
+    def test_enum_from_class_id(self):
+        """BottleType can be constructed from class_id."""
+        self.assertEqual(BottleType(0), BottleType.NONE)
+        self.assertEqual(BottleType(1), BottleType.POOL_VERDE)
+        self.assertEqual(BottleType(2), BottleType.HATSU_MORADO)
+
+
+class TestBottlePrediction(unittest.TestCase):
+    """BottlePrediction dataclass contract."""
+
+    def test_construction(self):
+        """BottlePrediction can be constructed with valid args."""
+        pred = BottlePrediction(class_id=1, confidence=0.85, class_name="Pool Verde")
+        self.assertEqual(pred.class_id, 1)
+        self.assertEqual(pred.confidence, 0.85)
+        self.assertEqual(pred.class_name, "Pool Verde")
+
+    def test_frozen_dataclass(self):
+        """BottlePrediction is frozen (immutable)."""
+        pred = BottlePrediction(class_id=0, confidence=0.0, class_name="No bottle")
+        with self.assertRaises(AttributeError):
+            pred.class_id = 1  # pyright: ignore
+
+
+class TestBottleTFClassifier(unittest.TestCase):
+    """Classifier prediction and threshold behaviour."""
+
+    # Shared dummy frame (any size; to_tf_input handles resize internally)
+    FRAME = np.zeros((480, 640, 3), dtype=np.uint8)
 
     def setUp(self):
-        self.classifier = BottleClassifier(threshold=0.7)
-        self.classifier._net = MagicMock()
-        self.frame = np.zeros((self.FRAME_H, self.FRAME_W, 3), dtype=np.uint8)
+        """Create a BottleTFClassifier with mocked model.
 
-    def _inject_detection(self, class_id: int, confidence: float, **kw):
-        """Replace net.forward() with a controlled detection."""
-        self.classifier._net.forward.return_value = _make_detection(
-            class_id, confidence, **kw
-        )
+        We patch ``tf.keras.models.load_model`` to avoid needing a real
+        model file, then replace ``_forward`` with a controllable mock
+        so that ``predict()`` returns controlled probabilities without
+        invoking TensorFlow graph tracing.
+        """
+        patcher = patch("tensorflow.keras.models.load_model")
+        self.addCleanup(patcher.stop)
+        mock_load = patcher.start()
+        mock_load.return_value = MagicMock()
 
-    # --- Threshold 0.7 (default) ---
+        self.classifier = BottleTFClassifier("fake_path.h5", threshold=0.5)
 
-    def test_confidence_below_threshold_returns_not_bottle(self):
-        """confidence 0.6 (< 0.7) → is_bottle=False, box=None."""
-        self._inject_detection(class_id=5, confidence=0.6)
-        is_bottle, conf, box = self.classifier.predict(self.frame)
-        self.assertFalse(is_bottle)
-        self.assertAlmostEqual(conf, 0.6)
-        self.assertIsNone(box)
+        # Replace the compiled tf.function forward pass with a plain mock
+        self.classifier._forward = MagicMock()
 
-    def test_confidence_at_threshold_returns_bottle(self):
-        """confidence 0.7 (== 0.7) → is_bottle=True, box is tuple."""
-        self._inject_detection(class_id=5, confidence=0.7)
-        is_bottle, conf, box = self.classifier.predict(self.frame)
-        self.assertTrue(is_bottle)
-        self.assertAlmostEqual(conf, 0.7)
-        self.assertIsInstance(box, tuple)
-        self.assertEqual(len(box), 4)
+    def _set_probs(self, top_class: int, top_confidence: float):
+        """Set the mock forward pass to return a specific probability vector."""
+        import tensorflow as tf
+        probs = _make_softmax_probs(top_class, top_confidence)
+        self.classifier._forward.return_value = tf.constant(probs)
 
-    def test_confidence_above_threshold_returns_bottle(self):
-        """confidence 0.8 (> 0.7) → is_bottle=True."""
-        self._inject_detection(class_id=5, confidence=0.8)
-        is_bottle, conf, box = self.classifier.predict(self.frame)
-        self.assertTrue(is_bottle)
-        self.assertAlmostEqual(conf, 0.8)
-        self.assertIsNotNone(box)
+    # --- Class mapping ---
 
-    # --- Threshold 0.6 ---
+    def test_predict_class_0_no_bottle(self):
+        """Top class 0 with high confidence → class_id=0, name='No bottle'."""
+        self._set_probs(top_class=0, top_confidence=0.92)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, 0)
+        self.assertEqual(pred.class_name, "No bottle")
+        self.assertAlmostEqual(pred.confidence, 0.92)
 
-    def test_threshold_0_6_reject_below(self):
-        """threshold=0.6, confidence=0.59 → is_bottle=False."""
-        self.classifier.threshold = 0.6
-        self._inject_detection(class_id=5, confidence=0.59)
-        is_bottle, _, box = self.classifier.predict(self.frame)
-        self.assertFalse(is_bottle)
-        self.assertIsNone(box)
+    def test_predict_class_1_pool_verde(self):
+        """Top class 1 with high confidence → class_id=1, name='Pool Verde'."""
+        self._set_probs(top_class=1, top_confidence=0.88)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, 1)
+        self.assertEqual(pred.class_name, "Pool Verde")
+        self.assertAlmostEqual(pred.confidence, 0.88)
 
-    def test_threshold_0_6_accept_above(self):
-        """threshold=0.6, confidence=0.61 → is_bottle=True."""
-        self.classifier.threshold = 0.6
-        self._inject_detection(class_id=5, confidence=0.61)
-        is_bottle, _, box = self.classifier.predict(self.frame)
-        self.assertTrue(is_bottle)
-        self.assertIsNotNone(box)
+    def test_predict_class_2_hatsu_morado(self):
+        """Top class 2 with high confidence → class_id=2, name='Hatsu Morado'."""
+        self._set_probs(top_class=2, top_confidence=0.91)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, 2)
+        self.assertEqual(pred.class_name, "Hatsu Morado")
+        self.assertAlmostEqual(pred.confidence, 0.91)
 
-    # --- Threshold 0.8 ---
+    def test_class_id_maps_to_bottle_type(self):
+        """class_id matches BottleType value."""
+        self._set_probs(top_class=1, top_confidence=0.9)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, BottleType.POOL_VERDE)
 
-    def test_threshold_0_8_reject_below(self):
-        """threshold=0.8, confidence=0.79 → is_bottle=False."""
-        self.classifier.threshold = 0.8
-        self._inject_detection(class_id=5, confidence=0.79)
-        is_bottle, _, box = self.classifier.predict(self.frame)
-        self.assertFalse(is_bottle)
-        self.assertIsNone(box)
+        self._set_probs(top_class=2, top_confidence=0.9)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, BottleType.HATSU_MORADO)
 
-    def test_threshold_0_8_accept_above(self):
-        """threshold=0.8, confidence=0.81 → is_bottle=True."""
-        self.classifier.threshold = 0.8
-        self._inject_detection(class_id=5, confidence=0.81)
-        is_bottle, _, box = self.classifier.predict(self.frame)
-        self.assertTrue(is_bottle)
-        self.assertIsNotNone(box)
+    # --- Threshold behaviour ---
 
-    # --- Non-bottle class ---
+    def test_confidence_below_threshold_downgrades_to_class_0(self):
+        """confidence 0.49 (< 0.5) → class_id=0 (no bottle)."""
+        self._set_probs(top_class=1, top_confidence=0.49)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, 0)
+        self.assertEqual(pred.class_name, "No bottle")
 
-    def test_non_bottle_class_ignored(self):
-        """class_id=1 (not bottle) high confidence → is_bottle=False, box=None."""
-        self._inject_detection(class_id=1, confidence=0.95)
-        is_bottle, conf, box = self.classifier.predict(self.frame)
-        self.assertFalse(is_bottle)
-        self.assertEqual(conf, 0.0)  # only bottle-class confidence is tracked
-        self.assertIsNone(box)
+    def test_confidence_at_threshold_keeps_class(self):
+        """confidence 0.5 (== 0.5) → keeps predicted class."""
+        self._set_probs(top_class=1, top_confidence=0.5)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, 1)
+        self.assertEqual(pred.class_name, "Pool Verde")
 
-    def test_no_detections_returns_not_bottle(self):
-        """Empty detections array → is_bottle=False, confidence=0.0, box=None."""
-        self.classifier._net.forward.return_value = np.zeros((1, 1, 0, 7), dtype=np.float32)
-        is_bottle, conf, box = self.classifier.predict(self.frame)
-        self.assertFalse(is_bottle)
-        self.assertEqual(conf, 0.0)
-        self.assertIsNone(box)
+    def test_confidence_above_threshold_keeps_class(self):
+        """confidence 0.51 (> 0.5) → keeps predicted class."""
+        self._set_probs(top_class=1, top_confidence=0.51)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, 1)
+        self.assertEqual(pred.class_name, "Pool Verde")
 
-    # --- Bounding box coordinate mapping ---
+    # --- Threshold at different levels ---
 
-    def test_box_coordinates_mapped_to_frame(self):
-        """Normalised coords from DNN are mapped to original frame pixels."""
-        # DNN coords (0.25, 0.25) → (0.75, 0.75) in 300×300 input
-        # → frame pixels on 640×480: (160, 120) → (480, 360)
-        self._inject_detection(
-            class_id=5, confidence=0.9,
-            x1=0.25, y1=0.25, x2=0.75, y2=0.75,
-        )
-        _, _, box = self.classifier.predict(self.frame)
-        self.assertEqual(box, (160, 120, 480, 360))
+    def test_custom_threshold_0_7_keeps_high_confidence(self):
+        """threshold=0.7, confidence=0.85 → keeps class."""
+        self.classifier.threshold = 0.7
+        self._set_probs(top_class=2, top_confidence=0.85)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, 2)
+        self.assertAlmostEqual(pred.confidence, 0.85)
 
-    def test_box_none_when_no_bottle(self):
-        """No detection → box is None."""
-        self._inject_detection(class_id=1, confidence=0.9)
-        _, _, box = self.classifier.predict(self.frame)
-        self.assertIsNone(box)
+    def test_custom_threshold_0_7_rejects_moderate(self):
+        """threshold=0.7, confidence=0.65 → downgrades to class 0."""
+        self.classifier.threshold = 0.7
+        self._set_probs(top_class=2, top_confidence=0.65)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, 0)
+        self.assertEqual(pred.class_name, "No bottle")
+
+    # --- Dual bottle scenario (dominant class wins) ---
+
+    def test_dual_bottle_dominant_wins(self):
+        """Two classes both above threshold → highest confidence wins."""
+        # Class 1 at 0.75, class 2 at 0.20
+        import tensorflow as tf
+        probs = np.array([[0.05, 0.75, 0.20]], dtype=np.float32)
+        self.classifier._forward.return_value = tf.constant(probs)
+        pred = self.classifier.predict(self.FRAME)
+        self.assertEqual(pred.class_id, 1)
+        self.assertEqual(pred.class_name, "Pool Verde")
+        self.assertAlmostEqual(pred.confidence, 0.75)
 
     # --- Error handling ---
-
-    def test_predict_without_model_raises(self):
-        """Calling predict() without load_model() raises RuntimeError."""
-        unloaded = BottleClassifier()
-        with self.assertRaises(RuntimeError):
-            unloaded.predict(self.frame)
 
     def test_invalid_threshold_raises(self):
         """threshold outside [0, 1] raises ValueError."""
         with self.assertRaises(ValueError):
-            BottleClassifier(threshold=1.5)
+            BottleTFClassifier("fake.h5", threshold=1.5)
         with self.assertRaises(ValueError):
-            BottleClassifier(threshold=-0.1)
+            BottleTFClassifier("fake.h5", threshold=-0.1)
 
 
 if __name__ == "__main__":
