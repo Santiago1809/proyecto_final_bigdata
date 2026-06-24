@@ -1,11 +1,13 @@
 """Image preprocessing utilities for the vision pipeline.
 
 Resizes frames to 300x300 and converts them to DNN-compatible blobs
-for MobileNet SSD inference via OpenCV.
+for MobileNet SSD inference via OpenCV (legacy).  Also provides
+:func:`to_tf_input` for the TensorFlow-based classifier.
 """
 
 import cv2
 import numpy as np
+import tensorflow as tf
 
 _INPUT_SIZE = (300, 300)
 _MEAN = (127.5, 127.5, 127.5)
@@ -46,4 +48,26 @@ def to_blob(frame: np.ndarray) -> np.ndarray:
         mean=_MEAN,
         swapRB=False,
         crop=False,
+    )
+
+
+def to_tf_input(frame: np.ndarray) -> np.ndarray:
+    """Preprocess a BGR frame for MobileNetV2 inference.
+
+    Resizes to 224×224 with bilinear interpolation, converts BGR→RGB,
+    and applies ``mobilenet_v2.preprocess_input`` (scales pixels to
+    ``[-1, 1]``).
+
+    Args:
+        frame: BGR image from camera (any size).
+
+    Returns:
+        ``float32`` array of shape ``(224, 224, 3)`` ready for model
+        input.  The caller should add a batch dimension before inference.
+
+    """
+    resized = cv2.resize(frame, (224, 224), interpolation=cv2.INTER_LINEAR)
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    return tf.keras.applications.mobilenet_v2.preprocess_input(
+        rgb.astype(np.float32),
     )
