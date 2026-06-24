@@ -185,9 +185,6 @@ src/
         ├── servo_sweep.h     # Servo sweep via LEDC + timer
         └── firmware.ino      # Main ESP32 firmware
 
-data/
-└── samples/                  # Labeled test images (bottle_/nobottle_)
-
 tests/
 ├── test_message.py           # Protocol roundtrip tests
 └── test_classifier.py        # Classifier threshold boundary tests

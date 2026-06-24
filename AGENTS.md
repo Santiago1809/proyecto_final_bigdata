@@ -42,16 +42,13 @@ src/
 │   ├── main.py      # → orchestrator entry point
 │   ├── capture.py   # → OpenCV VideoCapture wrapper
 │   ├── preprocess.py# → resize + DNN blob
-│   └── classifier.py# → MobileNet SSD (COCO class 39, bottle)
+│       └── classifier.py# → MobileNet SSD (VOC class 5, bottle)
 ├── protocol/        # shared serial protocol
 │   └── message.py   # → {"b":1}\n / {"b":0}\n encode/decode
 └── hardware/esp32/  # Arduino sketch
     ├── firmware.ino
     ├── led_control.h
     └── servo_sweep.h
-
-data/
-└── samples/         # labeled test images (bottle_ / nobottle_)
 
 models/              # place .caffemodel + .prototxt here (not committed)
 ```

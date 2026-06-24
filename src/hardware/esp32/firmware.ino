@@ -1,19 +1,19 @@
 /**
- * @file main.cpp
- * @brief ESP32 firmware for bottle detection servo scan.
+ * @file firmware.ino
+ * @brief ESP32 firmware for bottle detection with positional servo.
  *
- * Receives JSON commands over USB serial (9600 baud), drives green/red
- * LEDs based on classification, and runs a continuous 180° servo sweep
- * via hardware timer.
+ * Receives JSON commands over USB serial (9600 baud). Drives green/red
+ * LEDs based on classification, and positions the servo to the angle
+ * specified in the command.
  *
  * Command format:
- *   {"b":1}\n  → Green LED (bottle detected)
- *   {"b":0}\n  → Red LED (no bottle detected)
+ *   {"b":1,"s":90}\n   → Green LED, servo at 90° (bottle detected)
+ *   {"b":0,"s":180}\n  → Red LED, servo at 180° (no bottle)
  *
  * Autonomous fallback:
  *   If no serial command is received for >= 5 seconds, the servo
- *   continues sweeping and both LEDs turn off until a new command
- *   arrives.
+ *   stays at its last position and both LEDs turn off until a new
+ *   command arrives.
  *
  * Wiring:
  *   - Green LED → GPIO 26 (via 220Ω resistor)
@@ -22,7 +22,7 @@
  */
 
 #include "led_control.h"
-#include "servo_sweep.h"
+#include "servo_control.h"
 
 // Pin assignments
 constexpr uint8_t PIN_GREEN_LED = 26;
@@ -33,8 +33,8 @@ constexpr uint8_t PIN_SERVO     = 13;
 constexpr unsigned long SERIAL_BAUD = 9600;
 
 // Global objects
-LEDControl   leds(PIN_GREEN_LED, PIN_RED_LED);
-ServoSweep   sweep;
+LEDControl     leds(PIN_GREEN_LED, PIN_RED_LED);
+ServoControl   servo;
 
 // Buffer for serial input
 constexpr uint8_t SERIAL_BUF_SIZE = 32;
@@ -48,8 +48,7 @@ void setup() {
   Serial.setTimeout(50);
 
   leds.begin();
-  sweep.begin(PIN_SERVO);
-  sweep.start();
+  servo.begin(PIN_SERVO);
 
   // Signal ready with a brief blink
   leds.off();
@@ -78,7 +77,7 @@ void loop() {
 
   // --- Standby / timeout handling ---
   if (leds.isTimedOut()) {
-    // Autonomous fallback: sweep continues, LEDs go dark
+    // Autonomous fallback: LEDs go dark, servo stays at last position
     leds.off();
   } else {
     // Normal operation: standby blink pattern if idle
@@ -90,23 +89,20 @@ void loop() {
 }
 
 /**
- * @brief Parse a JSON command string and update LED state.
+ * @brief Parse a JSON command string, update LED and servo.
  *
- * Expected format: {"b":0} or {"b":1}
+ * Expected format: {"b":0|1,"s":<angle>}
  *
  * @param json Null-terminated C string containing the JSON payload.
  */
 void processCommand(const char* json) {
-  // Simple JSON parser — looks for key "b" and integer value 0 or 1.
-  // Using ArduinoJson would be cleaner but we keep dependencies minimal.
+  // --- Parse "b" key (bottle flag) ---
+  const char* bKey = strstr(json, "\"b\"");
+  if (bKey == nullptr) return;
 
-  const char* key = strstr(json, "\"b\"");
-  if (key == nullptr) return;
-
-  const char* colon = strchr(key, ':');
+  const char* colon = strchr(bKey, ':');
   if (colon == nullptr) return;
 
-  // Skip whitespace and read the value
   const char* value = colon + 1;
   while (*value == ' ' || *value == '\t') ++value;
 
@@ -117,5 +113,19 @@ void processCommand(const char* json) {
     leds.green();
   } else {
     leds.red();
+  }
+
+  // --- Parse "s" key (servo angle) ---
+  const char* sKey = strstr(json, "\"s\"");
+  if (sKey != nullptr) {
+    const char* sColon = strchr(sKey, ':');
+    if (sColon != nullptr) {
+      const char* sVal = sColon + 1;
+      while (*sVal == ' ' || *sVal == '\t') ++sVal;
+      int angle = atoi(sVal);
+      if (angle >= 0 && angle <= 180) {
+        servo.setAngle(angle);
+      }
+    }
   }
 }
