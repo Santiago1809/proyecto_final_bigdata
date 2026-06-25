@@ -9,3 +9,4 @@ models/*.keras
 models/*.h5
 models/*.caffemodel
 models/*.prototxt
+*.xlsx
