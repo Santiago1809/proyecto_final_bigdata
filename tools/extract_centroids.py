@@ -31,6 +31,7 @@ import numpy as np
 import tensorflow as tf
 
 from src.vision.preprocess import to_tf_input
+from training.config import Config
 
 _LOG = logging.getLogger("extract-centroids")
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
@@ -42,18 +43,32 @@ _BATCH_SIZE = 32  # default batch for feature extraction
 # ---------------------------------------------------------------------------
 
 
-def _discover_classes(data_dir: str) -> list[tuple[str, list[str]]]:
-    """Walk *data_dir* and return ``[(class_name, [image_paths])]``."""
+def _discover_classes(data_dir: str) -> list[tuple[str, list[str], int]]:
+    """Walk *data_dir* and return ``[(class_name, [image_paths], class_idx)]``.
+
+    Class indices follow :class:`training.config.Config.CLASS_NAMES` order
+    (``no_bottle=0, pool_verde=1, hatsu_morado=2``) to stay aligned with
+    the trained model's output.
+    """
     data_path = Path(data_dir)
-    classes: list[tuple[str, list[str]]] = []
-    for subdir in sorted(data_path.iterdir()):
-        if not subdir.is_dir():
+    available = {d.name for d in data_path.iterdir() if d.is_dir()}
+    class_names = Config().CLASS_NAMES
+
+    classes: list[tuple[str, list[str], int]] = []
+    for idx, cls_name in enumerate(class_names):
+        if cls_name not in available:
             continue
         images = []
         for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp"):
-            images.extend(str(p) for p in sorted(subdir.glob(ext)))
+            images.extend(str(p) for p in sorted((data_path / cls_name).glob(ext)))
         if images:
-            classes.append((subdir.name, images))
+            classes.append((cls_name, images, idx))
+
+    if not classes:
+        raise ValueError(
+            f"No matching class subdirectories found in {data_dir!r}. "
+            f"Expected at least one of: {class_names}"
+        )
     return classes
 
 
@@ -151,17 +166,16 @@ def extract_centroids(
     # ---- Load data ----
     classes = _discover_classes(data_dir)
     _LOG.info("Found %d classes:", len(classes))
-    for cls_name, imgs in classes:
-        _LOG.info("  %s: %d images", cls_name, len(imgs))
-
-    class_to_idx = {name: i for i, (name, _) in enumerate(classes)}
+    for cls_name, imgs, cls_idx in classes:
+        _LOG.info("  [%d] %s: %d images", cls_idx, cls_name, len(imgs))
 
     # ---- Extract features (batched) ----
-    all_features: dict[int, list[np.ndarray]] = {i: [] for i in range(len(classes))}
+    all_features: dict[int, list[np.ndarray]] = {}
 
-    for cls_name, image_paths in classes:
-        cls_idx = class_to_idx[cls_name]
-        _LOG.info("Extracting features for %s (%d images, batch=%d) ...", cls_name, len(image_paths), batch_size)
+    for cls_name, image_paths, cls_idx in classes:
+        all_features[cls_idx] = []
+        _LOG.info("Extracting features for [%d] %s (%d images, batch=%d) ...",
+                  cls_idx, cls_name, len(image_paths), batch_size)
         ds = _build_feature_dataset(image_paths, batch_size)
         for batch in ds:
             # The model expects RGB input with preprocess_input normalization
@@ -185,7 +199,9 @@ def extract_centroids(
         std_dist = float(dists.std())
         threshold = mean_dist + sigma * std_dist
 
-        cls_name = classes[cls_idx][0]
+        # Find the class name for this index
+        matching = [c for c in classes if c[2] == cls_idx]
+        cls_name = matching[0][0] if matching else f"class_{cls_idx}"
         result[str(cls_idx)] = {
             "mean": centroid.tolist(),
             "mean_dist": round(mean_dist, 4),
