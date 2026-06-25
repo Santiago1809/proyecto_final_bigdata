@@ -81,6 +81,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Confidence threshold (0..1, default 0.7)",
     )
     parser.add_argument(
+        "--rejection-sigma",
+        type=float,
+        default=6.0,
+        help="Feature-space rejection sigma (higher = more permissive, "
+        "default 6.0). Set to 0 to disable rejection entirely.",
+    )
+    parser.add_argument(
         "--test",
         action="store_true",
         help="Test mode: no serial (add --display to show window)",
@@ -124,6 +131,8 @@ def _draw_overlay(
     box: tuple[int, int, int, int] | None,
     fps: float = 0.0,
     class_name: str | None = None,
+    rejected: bool = False,
+    feature_distance: float = 0.0,
 ) -> cv2.Mat:
     """Annotate *frame* with bounding box, label, confidence and FPS.
 
@@ -135,6 +144,8 @@ def _draw_overlay(
         fps: Current frames-per-second for the overlay.
         class_name: Display label (e.g. "Pool Verde"). If ``None``,
             falls back to "BOTTLE" / "NO BOTTLE".
+        rejected: Whether feature-space rejection triggered.
+        feature_distance: Distance from class centroid.
 
     Returns:
         The annotated frame (same object as *frame*).
@@ -142,6 +153,8 @@ def _draw_overlay(
     """
     color = _COLOR_GREEN if is_bottle else _COLOR_RED
     label = class_name or ("BOTTLE" if is_bottle else "NO BOTTLE")
+    if rejected:
+        label = f"{label} [OOD]"  # show original label even when rejected
     text = f"{label}  {confidence:.1%}"
 
     # --- Bounding box ---
@@ -163,7 +176,8 @@ def _draw_overlay(
 
     # --- Bottom status bar ---
     h, w = frame.shape[:2]
-    bar_text = f"{label}  ({confidence:.1%})  |  Servo: {'90°' if is_bottle else '180°'}"
+    dist_text = f"  dist={feature_distance:.2f}" if rejected else ""
+    bar_text = f"{label}  ({confidence:.1%}){dist_text}  |  Servo: {'90°' if is_bottle else '180°'}"
     cv2.rectangle(frame, (0, h - 36), (w, h), _COLOR_BG, -1)
     cv2.putText(
         frame, bar_text, (12, h - 10),
@@ -238,7 +252,11 @@ def run(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     model_path = args.model or _TF_DEFAULT_MODEL
     _LOG.info("Loading TF model (threshold=%.2f) from %s ...", args.threshold, model_path)
-    classifier = BottleTFClassifier(model_path=model_path, threshold=args.threshold)
+    classifier = BottleTFClassifier(
+        model_path=model_path,
+        threshold=args.threshold,
+        rejection_sigma=args.rejection_sigma,
+    )
     _LOG.info("TF model loaded successfully.")
 
     serial_port: serial.Serial | None = None if args.test else _open_serial(args.port)
@@ -300,6 +318,8 @@ def run(args: argparse.Namespace) -> None:
             bottle_type = pred.class_id  # class_id matches BottleType
             class_name = pred.class_name
             box = None  # TF classifier has no bounding box
+            rejected = pred.rejected if hasattr(pred, "rejected") else False
+            feature_distance = pred.feature_distance if hasattr(pred, "feature_distance") else 0.0
 
             servo_angle = 90 if is_bottle else 180
 
@@ -312,10 +332,12 @@ def run(args: argparse.Namespace) -> None:
             state_changed = is_bottle != last_bottle_state
             if state_changed or (now - last_log_time) >= _LOG_INTERVAL:
                 label = class_name or ("BOTTLE" if is_bottle else "NOT BOTTLE")
+                reject_tag = " [OOD-REJECTED]" if rejected else ""
                 _LOG.info(
-                    "%s (confidence=%.3f) servo=%d° type=%d%s",
+                    "%s (confidence=%.3f) servo=%d° type=%d%s%s",
                     label, confidence, servo_angle, bottle_type,
-                    f" box={box}" if box else "",
+                    f" dist={feature_distance:.2f}" if rejected else "",
+                    reject_tag,
                 )
                 last_log_time = now
             last_bottle_state = is_bottle
@@ -325,6 +347,8 @@ def run(args: argparse.Namespace) -> None:
                 display = _draw_overlay(
                     frame, is_bottle, confidence, box, fps_ema,
                     class_name=class_name,
+                    rejected=rejected,
+                    feature_distance=feature_distance,
                 )
                 cv2.imshow(_WINDOW_NAME, display)
                 key = cv2.waitKey(1) & 0xFF

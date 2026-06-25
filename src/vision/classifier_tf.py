@@ -67,11 +67,18 @@ class BottlePrediction:
         class_id: Predicted class index (0, 1, or 2).
         confidence: Softmax probability of the predicted class (0..1).
         class_name: Human-readable label corresponding to *class_id*.
+        rejected: Whether the prediction was rejected by feature-space
+            distance check.  ``True`` means the input looked like the
+            predicted class but was too far from its centroid.
+        feature_distance: Euclidean distance from the predicted class
+            centroid (0 if rejection is disabled).
     """
 
     class_id: int
     confidence: float
     class_name: str
+    rejected: bool = False
+    feature_distance: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +194,7 @@ class BottleTFClassifier:
             raise ValueError(f"Threshold must be in [0, 1], got {threshold}")
 
         self._threshold = threshold
+        self._rejection_sigma = rejection_sigma
         self._model = self._load_model_safe(model_path)
         self._forward = self._build_forward()
 
@@ -208,6 +216,13 @@ class BottleTFClassifier:
                     len(self._centroids),
                     centroids_path,
                 )
+                # Log thresholds for reference
+                for cid, info in sorted(self._centroids.items(), key=lambda x: int(x[0])):
+                    logger.info(
+                        "  centroid[%s] %s: threshold=%.4f, mean_dist=%.4f, samples=%d",
+                        cid, info.get("class_name", "?"),
+                        info["threshold"], info["mean_dist"], info.get("num_samples", 0),
+                    )
             except Exception as exc:
                 logger.warning(
                     "Failed to load centroids from %s: %s — rejection disabled",
@@ -317,24 +332,33 @@ class BottleTFClassifier:
         self,
         class_id: int,
         features: np.ndarray,
-    ) -> bool:
+    ) -> tuple[bool, float, float]:
         """Check whether *features* are too far from the *class_id* centroid.
 
-        Returns ``True`` if the Euclidean distance exceeds the class
-        threshold (→ should be rejected / downgraded to NONE).
+        Uses the runtime *rejection_sigma* to compute the threshold as
+        ``mean_dist + sigma * std_dist``, so the user can adjust
+        permissiveness without regenerating centroids.
+
+        Returns:
+            ``(rejected, distance, threshold)`` tuple where *rejected* is
+            ``True`` if the Euclidean distance exceeds the threshold.
         """
         if not self._centroids:
-            return False
+            return False, 0.0, 0.0
 
         centroid_info = self._centroids.get(str(class_id))
         if centroid_info is None:
-            return False
+            return False, 0.0, 0.0
 
         centroid = np.array(centroid_info["mean"], dtype=np.float32)
-        threshold = centroid_info["threshold"]
+        mean_dist = centroid_info["mean_dist"]
+        std_dist = centroid_info["std_dist"]
+
+        # Compute threshold from runtime sigma (not baked-in value)
+        threshold = mean_dist + self._rejection_sigma * std_dist
         distance = float(np.linalg.norm(features - centroid))
 
-        return distance > threshold
+        return distance > threshold, distance, threshold
 
     def _parse_prediction(
         self,
@@ -350,25 +374,38 @@ class BottleTFClassifier:
         probs_np: np.ndarray = probs.numpy()  # shape (3,)
         class_id = int(np.argmax(probs_np))
         confidence = float(probs_np[class_id])
+        rejected = False
+        feature_distance = 0.0
 
         # Feature-space rejection
         if features is not None and self._rejection_active:
-            if self._reject_by_features(class_id, features.numpy()):
-                logger.debug(
-                    "Rejected class %d (%s) — features too far from centroid",
-                    class_id,
-                    _CLASS_NAMES[class_id],
+            should_reject, feature_distance, threshold = self._reject_by_features(
+                class_id, features.numpy(),
+            )
+            if should_reject:
+                logger.info(
+                    "REJECTED class %d (%s) — "
+                    "dist=%.4f > threshold=%.4f (sigma=%.1f)",
+                    class_id, _CLASS_NAMES[class_id],
+                    feature_distance, threshold, self._rejection_sigma,
                 )
+                rejected = True
+                # Keep the softmax confidence even after rejection — the
+                # model IS confident, we're just overriding it because the
+                # input is OOD.  Display can show "Pool Verde (95%) [OOD]".
                 class_id = 0
-                confidence = float(probs_np[0])
 
         # Confidence threshold
         if confidence < self._threshold:
             class_id = 0
-            confidence = float(probs_np[0])
+            # Only lower confidence if we didn't already reject
+            if not rejected:
+                confidence = float(probs_np[0])
 
         return BottlePrediction(
             class_id=class_id,
             confidence=confidence,
             class_name=_CLASS_NAMES[class_id],
+            rejected=rejected,
+            feature_distance=feature_distance,
         )
