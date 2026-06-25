@@ -19,8 +19,10 @@
  *   - Green LED → GPIO 26 (via 220Ω resistor)
  *   - Red LED   → GPIO 27 (via 220Ω resistor)
  *   - Servo     → GPIO 13 (signal wire)
+ *   - Buzzer    → GPIO 12 (active buzzer, HIGH = on)
  */
 
+#include "buzzer_control.h"
 #include "led_control.h"
 #include "servo_control.h"
 
@@ -28,13 +30,15 @@
 constexpr uint8_t PIN_GREEN_LED = 02;
 constexpr uint8_t PIN_RED_LED   = 05;
 constexpr uint8_t PIN_SERVO     = 14;
+constexpr uint8_t PIN_BUZZER    = 27;
 
 // Serial
 constexpr unsigned long SERIAL_BAUD = 9600;
 
 // Global objects
-LEDControl     leds(PIN_GREEN_LED, PIN_RED_LED);
-ServoControl   servo;
+LEDControl      leds(PIN_GREEN_LED, PIN_RED_LED);
+ServoControl    servo;
+BuzzerControl   buzzer(PIN_BUZZER);
 
 // Buffer for serial input
 constexpr uint8_t SERIAL_BUF_SIZE = 32;
@@ -49,6 +53,7 @@ void setup() {
 
   leds.begin();
   servo.begin(PIN_SERVO);
+  buzzer.begin();
 
   // Signal ready with a brief blink
   leds.off();
@@ -84,6 +89,9 @@ void loop() {
     leds.standbyBlink();
   }
 
+  // Update buzzer (turns OFF after beep duration expires)
+  buzzer.update();
+
   // Small delay to prevent tight-loop watchdog issues
   delay(5);
 }
@@ -111,6 +119,7 @@ void processCommand(const char* json) {
 
   if (bottleFlag) {
     leds.green();
+    buzzer.beep(200);  // short beep on detection
   } else {
     leds.red();
   }

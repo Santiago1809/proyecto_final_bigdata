@@ -9,7 +9,7 @@ Optional arguments::
 
     python training/train.py --data-dir ./data            \\
         --epochs-frozen 15 --epochs-finetune 10           \\
-        --batch-size 16 --lr-frozen 1e-3 --lr-finetune 1e-5 \\
+        --lr-frozen 1e-3 --lr-finetune 1e-5 \\
         --model-dir ./models
 """
 
@@ -55,9 +55,15 @@ def _setup_logging() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_callbacks(patience: int) -> list[tf.keras.callbacks.Callback]:
+def _build_callbacks(patience: int, model_dir: str) -> list[tf.keras.callbacks.Callback]:
     """Return the standard set of training callbacks."""
     return [
+        tf.keras.callbacks.ModelCheckpoint(
+            monitor="val_loss",
+            save_best_only=True,
+            filepath=os.path.join(model_dir, "best_model.keras"),
+            verbose=1,
+        ),
         tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
             patience=patience,
@@ -66,7 +72,7 @@ def _build_callbacks(patience: int) -> list[tf.keras.callbacks.Callback]:
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor="val_loss",
-            factor=0.5,
+            factor=0.3,
             patience=patience // 2,
             min_lr=1e-7,
             verbose=1,
@@ -96,12 +102,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model-dir",
         default=Config.MODEL_SAVE_DIR,
         help=f"Directory to save trained models (default: {Config.MODEL_SAVE_DIR})",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=Config.BATCH_SIZE,
-        help=f"Batch size (default: {Config.BATCH_SIZE})",
     )
     parser.add_argument(
         "--epochs-frozen",
@@ -165,14 +165,25 @@ def train(args: argparse.Namespace) -> str:
 
     # ---- Phase 0: load data ----
     _LOG.info("Loading dataset ...")
-    train_ds, val_ds, class_names = load_dataset(
+    train_ds, val_ds, class_names, class_counts = load_dataset(
         data_dir=args.data_dir,
         config=Config(
             IMG_SIZE=args.img_size,
-            BATCH_SIZE=args.batch_size,
         ),
     )
     _LOG.info("Classes found: %s", class_names)
+    for name, count in zip(class_names, class_counts):
+        _LOG.info("  %s: %d images", name, count)
+
+    # Compute class weights to balance the loss
+    total = sum(class_counts)
+    n_classes = len(class_counts)
+    class_weight = {
+        i: total / (n_classes * count)
+        for i, count in enumerate(class_counts)
+    }
+    _LOG.info("Class weights: %s", class_weight)
+    _LOG.info("  (minority classes get higher weight to balance training)")
 
     # ---- Build model (frozen backbone) ----
     _LOG.info("Building MobileNetV2 with frozen backbone ...")
@@ -196,7 +207,8 @@ def train(args: argparse.Namespace) -> str:
         train_ds,
         validation_data=val_ds,
         epochs=args.epochs_frozen,
-        callbacks=_build_callbacks(Config.PATIENCE),
+        callbacks=_build_callbacks(Config.PATIENCE, args.model_dir),
+        class_weight=class_weight,
         verbose=1,
     )
 
@@ -216,19 +228,20 @@ def train(args: argparse.Namespace) -> str:
         train_ds,
         validation_data=val_ds,
         epochs=args.epochs_finetune,
-        callbacks=_build_callbacks(Config.PATIENCE),
+        callbacks=_build_callbacks(Config.PATIENCE, args.model_dir),
+        class_weight=class_weight,
         verbose=1,
     )
 
     # ---- Save ----
     os.makedirs(args.model_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = os.path.join(args.model_dir, f"bottle_classifier_{timestamp}.h5")
+    save_path = os.path.join(args.model_dir, f"bottle_classifier_{timestamp}.keras")
     model.save(save_path)
     _LOG.info("Model saved to: %s", save_path)
 
     # Also save a "latest" copy (always overwrites)
-    latest_path = os.path.join(args.model_dir, "bottle_classifier_latest.h5")
+    latest_path = os.path.join(args.model_dir, "bottle_classifier_latest.keras")
     model.save(latest_path)
     _LOG.info("Latest model saved to: %s", latest_path)
 

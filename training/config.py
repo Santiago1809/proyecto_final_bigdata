@@ -6,7 +6,30 @@ Override via CLI arguments in ``train.py``.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+
+
+def auto_batch_size(max_batch: int = 32, safety_mb: int = 512) -> int:
+    """Determine a safe batch size from available RAM."""
+    try:
+        import psutil  # noqa: PLC0415
+
+        free_mb = psutil.virtual_memory().available / (1024 * 1024)
+    except ImportError:
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        free_mb = int(line.split()[1]) / 1024.0
+                        break
+                else:
+                    free_mb = 4096
+        except OSError:
+            free_mb = 4096
+
+    inferred = int(free_mb / safety_mb)
+    return max(1, min(inferred, max_batch))
 
 
 @dataclass(frozen=True)
@@ -31,17 +54,20 @@ class Config:
     # ------------------------------------------------------------------
     # Classification head
     # ------------------------------------------------------------------
-    DENSE_UNITS: int = 128
-    """Number of units in the penultimate dense layer."""
+    DENSE_UNITS: int = 256
+    """Number of units in the first dense layer of the classification head."""
 
-    DROPOUT_RATE: float = 0.2
+    DENSE_UNITS_2: int = 128
+    """Number of units in the second dense layer of the classification head."""
+
+    DROPOUT_RATE: float = 0.3
     """Dropout rate before the final softmax layer."""
 
     # ------------------------------------------------------------------
     # Data pipeline
     # ------------------------------------------------------------------
-    BATCH_SIZE: int = 32
-    """Training and validation batch size."""
+    BATCH_SIZE: int = field(default_factory=auto_batch_size)
+    """Training and validation batch size (auto-calculated from available RAM)."""
 
     VALIDATION_SPLIT: float = 0.2
     """Fraction of data held out for validation (stratified)."""
@@ -55,7 +81,7 @@ class Config:
     FROZEN_EPOCHS: int = 20
     """Maximum epochs training with a frozen backbone."""
 
-    FROZEN_LR: float = 1e-3
+    FROZEN_LR: float = 5e-4
     """Learning rate for the frozen-backbone phase."""
 
     # ------------------------------------------------------------------
