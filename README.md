@@ -1,203 +1,216 @@
-# Bottle Detection Servo Scan
+# Bottle Detection — Clasificador de Envases
 
-Vision-based system that detects plastic bottles in a camera feed and signals an ESP32 to drive green/red LEDs while running a continuous 180° servo sweep.
+Sistema de visión artificial que detecta y clasifica botellas plásticas en tiempo real usando **TensorFlow + MobileNetV2** con una cámara USB, y controla un **ESP32** con LEDs, servomotor y zumbador.
 
-## System Overview
+Clasifica en 3 clases: `no_bottle` (fondo), `pool_verde`, `hatsu_morado`.
 
-```
-┌──────────────┐     ┌───────────────────┐     ┌──────────────────┐
-│  Camera      │     │  Vision Host       │     │  ESP32            │
-│  (USB)       │     │  (Python)          │     │                   │
-│              │     │                    │     │  ┌──────────────┐ │
-│  ── frame ──>│     │  capture.py        │     │  │ Timer ISR    │ │
-│              │     │  → preprocess.py    │     │  │ → sweep +1°  │ │
-│              │     │  → classifier.py    │     │  │   per 167ms  │ │
-│              │     │  → conf ≥ 0.7?      │     │  └──────────────┘ │
-│              │     │  → message.encode   │     │                   │
-│              │     │  → serial write     │     │  ┌──────────────┐ │
-│              │     │         │           │     │  │ Serial       │ │
-│              │     │         │ USB       │     │  │ → parse JSON │ │
-│              │     │         v           │     │  │ → set LED    │ │
-│              │     │  {"b":1} ──────────>│     │  └──────────────┘ │
-│              │     │  {"b":0} ──────────>│     │                   │
-└──────────────┘     └───────────────────┘     └──────────────────┘
-```
+> 📖 Para documentación **exhaustiva** de cada módulo, flag y configuración, ver [`DOCUMENTACION_PROYECTO.md`](DOCUMENTACION_PROYECTO.md).
 
-## Components
+---
 
-### Vision Pipeline (Python / Host)
-
-| Module | File | Purpose |
-|--------|------|---------|
-| Capture | `src/vision/capture.py` | OpenCV VideoCapture wrapper, 640×480 BGR frames |
-| Preprocess | `src/vision/preprocess.py` | 300×300 resize + DNN blob conversion |
-| Classifier | `src/vision/classifier.py` | MobileNet SSD inference, COCO class 39 (bottle), configurable threshold |
-| Orchestrator | `src/vision/main.py` | Capture → classify → serial dispatch loop |
-
-### ESP32 Firmware (C++)
-
-| Module | File | Purpose |
-|--------|------|---------|
-| LED Control | `src/hardware/esp32/led_control.h` | Green/red GPIO helpers, standby blink pattern |
-| Servo Sweep | `src/hardware/esp32/servo_sweep.h` | LEDC PWM (50 Hz), hardware timer ISR, 1°/167ms sweep |
-| Main | `src/hardware/esp32/firmware.ino` | Serial JSON parser, LED dispatch, autonomous fallback |
-
-### Protocol
-
-Compact JSON over USB serial at **9600 baud**:
-
-| Event | Message |
-|-------|---------|
-| Bottle detected | `{"b":1}\n` |
-| No bottle | `{"b":0}\n` |
-
-## Wiring Diagram (ASCII)
+## Arquitectura
 
 ```
-USB Host ──── USB Cable ──── ESP32 Dev Board
-                               │
-              ┌────────────────┼────────────────┐
-              │                │                 │
-           GPIO 26           GPIO 27           GPIO 13
-              │                │                 │
-           ╔══╧══╗          ╔══╧══╗          ╔══╧════╗
-           ║ 220Ω ║          ║ 220Ω ║          ║ SG90  ║
-           ╚══╤══╝          ╚══╤══╝          ║ Servo ║
-              │                │              ╚══╤════╝
-          ┌───┴───┐        ┌───┴───┐             │
-          │ Green │        │  Red  │        Signal│(Orange)
-          │  LED  │        │  LED  │             │
-          └───┬───┘        └───┬───┘         ┌───┴────┐
-              │                │             │ 5V GND │
-             GND              GND            │(Brown/ │
-                                             │ Red)   │
-                                             └────────┘
+Cámara USB ──> Python Host ──serial──> ESP32
+                  │                    │
+            ┌─────┴─────┐        ┌─────┴─────┐
+            │MobileNetV2 │        │LEDs G+R   │
+            │3 clases    │        │Servo SG90 │
+            │Feature     │        │Buzzer     │
+            │rejection   │        └───────────┘
+            └────────────┘
 ```
 
-**Servo power**: Use an external 5V supply for the SG90. Do NOT draw servo current from the ESP32 USB port.
+**Host (Python):** captura frames → preprocesa → clasifica con MobileNetV2 → aplica rechazo por distancia de características → envía JSON por serial → registra detecciones en Excel.
 
-**LED resistors**: 220Ω current-limiting resistors are required for each LED.
+**ESP32 (C++):** recibe JSON → enciende LED verde/rojo → posiciona servo → emite pitido.
 
-## Setup
+---
 
-### Prerequisites
-
-- Python 3.10+
-- ESP32 dev board (ESP32-WROOM-32 or similar)
-- USB camera
-- SG90 (or equivalent) servomotor
-- Green LED, Red LED, 220Ω resistors, breadboard, jumper wires
-
-### Host Installation
+## Setup Rápido
 
 ```bash
-# Clone the repository
-git clone <repo-url> && cd bottle-detection-servo
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# Place model files in models/
-# Download MobileNetSSD_deploy.caffemodel and MobileNetSSD_deploy.prototxt
-# into the models/ directory
 ```
 
-### Model Files
+El modelo entrenado va en `models/bottle_classifier_latest.keras`. Se produce con el pipeline de entrenamiento (ver más abajo).
 
-This system uses MobileNet SSD via OpenCV DNN. You need:
+---
 
-- `models/MobileNetSSD_deploy.caffemodel` (weights)
-- `models/MobileNetSSD_deploy.prototxt` (architecture)
-
-These can be obtained from the [OpenCV Model Zoo](https://github.com/opencv/opencv_extra/tree/master/testdata/dnn) or other MobileNet SSD v1 COCO repositories.
-
-## Usage
-
-### Vision Pipeline (with ESP32)
+## Uso en Producción
 
 ```bash
-# Auto-detect ESP32 serial port
+# Ejecutar con cámara 0, threshold 0.7, auto-detecta ESP32
 python -m src.vision.main
 
-# Specify serial port and custom threshold
-python -m src.vision.main --port /dev/ttyUSB0 --threshold 0.75
+# Cámara específica y threshold más exigente
+python -m src.vision.main --camera 2 --threshold 0.85
 
-# Use camera index 2
-python -m src.vision.main --camera 2
+# Modo test (sin ESP32)
+python -m src.vision.main --test --display
+
+# Ajustar sensibilidad del rechazo OOD
+python -m src.vision.main --rejection-sigma 4.0
 ```
 
-### Test Mode (no serial required)
+### Flags principales
+
+| Flag | Default | Descripción |
+|------|---------|-------------|
+| `--camera` | `0` | Índice de cámara USB |
+| `--threshold` | `0.7` | Confianza mínima [0-1] |
+| `--rejection-sigma` | `6.0` | Sensibilidad del rechazo OOD (0 = desactivado) |
+| `--test` | — | Sin conexión serial |
+| `--display` | — | Forzar ventana de preview |
+| `--model` | `models/bottle_classifier_latest.keras` | Ruta al modelo |
+
+Tecla `q` o `ESC` para salir.
+
+---
+
+## Entrenamiento
+
+El pipeline está en `training/`. Requiere dependencias adicionales:
 
 ```bash
-python -m src.vision.main --test
+pip install -r training/requirements-train.txt
 ```
 
-Runs the full vision pipeline without connecting to an ESP32. Classification results are logged to the console.
+### Dataset
 
-### Running Tests
+Colocar imágenes en `training/data/<clase>/`:
+
+```
+training/data/
+├── no_bottle/       # ~400 imágenes de fondo
+├── pool_verde/      # ~750 imágenes Pool Verde
+└── hatsu_morado/    # ~750 imágenes Hatsu Morado
+```
+
+### Capturar dataset desde la webcam
 
 ```bash
-# Unit tests
+python -m tools.capture_dataset
+```
+
+Teclas: `1`=no_bottle, `2`=pool_verde, `3`=hatsu_morado, `r`=borrar todas, `q`=salir.
+
+### Entrenar modelo
+
+```bash
+python training/train.py --data-dir training/data
+```
+
+Entrenamiento en dos fases: backbone congelado (20 épocas, LR 5e-4) → fine-tuning últimas 30 capas (15 épocas, LR 1e-5).
+
+El modelo se guarda en `models/bottle_classifier_latest.keras`.
+
+### Extraer centroides (rechazo OOD)
+
+```bash
+python -m tools.extract_centroids \
+    --model models/bottle_classifier_latest.keras \
+    --data-dir training/data
+```
+
+Produce `models/bottle_classifier_latest_centroids.json` para el sistema de rechazo por distancia de características.
+
+---
+
+## Tests
+
+```bash
+# Todos
 python -m unittest discover tests -v
 
-# Specific test file
+# Individuales
 python -m unittest tests.test_message
 python -m unittest tests.test_classifier
+python -m unittest tests.test_excel_logger
 ```
 
-### ESP32 Firmware
+---
 
-Open `src/hardware/esp32/firmware.ino` in the Arduino IDE (or platformio):
+## ESP32 — Firmware
 
-1. Select your ESP32 board.
-2. Flash the firmware via USB.
-3. Open the Serial Monitor at 9600 baud to verify.
+Abrir `src/hardware/esp32/esp32.ino` en Arduino IDE, seleccionar placa ESP32 y flashear.
 
-The servo sweep starts automatically on boot. LEDs respond to incoming JSON commands.
+### Pines
 
-## Autonomous Fallback
+| Componente | GPIO | Nota |
+|------------|------|------|
+| LED Verde | 2 | Con resistencia 220Ω a GND |
+| LED Rojo | 5 | Con resistencia 220Ω a GND |
+| Servo SG90 | 14 | Señal naranja; **alimentación 5V externa** |
+| Buzzer activo | 27 | Señal; GND al ESP32 |
 
-If the ESP32 receives no serial command for **≥5 seconds**:
+**⚠️ No alimentar el servo desde el USB del ESP32** — usar fuente externa de 5V.
 
-- The servo sweep continues running (independent of host).
-- Both LEDs turn off until a new command arrives.
+### Protocolo serial (9600 baud)
 
-This ensures the mechanical system keeps moving even if the host disconnects or crashes.
+```json
+{"b":1,"t":1,"s":90}   // Pool Verde detectado → LED verde, servo 90°
+{"b":1,"t":2,"s":90}   // Hatsu Morado detectado → LED verde, servo 90°
+{"b":0,"t":0,"s":180}  // Sin botella → LED rojo, servo 180°
+```
 
-## Project Structure
+Si no recibe comandos por ≥5 segundos, los LEDs se apagan (fallback autónomo).
+
+---
+
+## Estructura del Proyecto
 
 ```
 src/
 ├── protocol/
-│   └── message.py          # JSON encode/decode for serial
+│   └── message.py              # JSON encode/decode serial
 ├── vision/
-│   ├── capture.py           # Camera frame acquisition
-│   ├── preprocess.py        # Resize + DNN blob conversion
-│   ├── classifier.py        # Bottle detection model wrapper
-│   └── main.py              # Orchestration entry point
-└── hardware/
-    └── esp32/
-        ├── led_control.h     # LED GPIO helpers
-        ├── servo_sweep.h     # Servo sweep via LEDC + timer
-        └── firmware.ino      # Main ESP32 firmware
+│   ├── main.py                 # Orquestador (captura → clasifica → envía)
+│   ├── capture.py              # Wrapper de cámara OpenCV
+│   ├── classifier_tf.py        # Clasificador MobileNetV2 + rechazo OOD
+│   ├── preprocess.py           # Preprocesamiento 224×224 RGB
+│   └── excel_logger.py         # Registro de detecciones en Excel
+└── hardware/esp32/
+    ├── esp32.ino               # Firmware principal
+    ├── led_control.h           # Control de LEDs
+    ├── servo_control.h         # Control de servomotor (PWM LEDC)
+    └── buzzer_control.h        # Control de zumbador no bloqueante
+
+training/
+├── train.py                    # Entrenamiento en dos fases
+├── model.py                    # Arquitectura MobileNetV2
+├── dataset.py                  # Carga + aumento de datos (9 transformaciones)
+├── config.py                   # Hiperparámetros
+└── data/                       # Dataset (no commiteado)
+
+tools/
+├── capture_dataset.py          # Captura de dataset desde webcam
+└── extract_centroids.py        # Extracción de centroides para rechazo
 
 tests/
-├── test_message.py           # Protocol roundtrip tests
-└── test_classifier.py        # Classifier threshold boundary tests
-
-models/                       # Place .caffemodel + .prototxt here
+├── test_message.py             # Tests del protocolo serial
+├── test_classifier.py          # Tests del clasificador
+└── test_excel_logger.py        # Tests del logger Excel
 ```
 
-## Design Decisions
+---
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Model | MobileNet SSD v1 (COCO class 39) | Zero extra ML dep — OpenCV DNN built-in |
-| Protocol | Compact JSON `{"b":N}\n` | Human-readable, debuggable, extensible |
-| Servo PWM | ESP32 LEDC hardware (50 Hz, 16-bit) | Jitter-free, no library needed |
-| Sweep timing | 1°/167ms (~30s full cycle) | Smooth sweep, mechanical stability |
-| Confidence threshold | 0.7 (configurable) | Balances precision vs recall (spec default) |
+## Librerías
+
+### Producción (`requirements.txt`)
+
+| Librería | Versión | Uso |
+|----------|---------|-----|
+| `opencv-python` | ≥4.8 | Captura y procesamiento de imágenes |
+| `numpy` | ≥1.24 | Operaciones numéricas |
+| `pyserial` | ≥3.5 | Comunicación serial con ESP32 |
+| `tensorflow-cpu` | ≥2.13 | Inferencia MobileNetV2 |
+| `pandas` | ≥2.0 | Logging a Excel |
+| `openpyxl` | ≥3.1 | Escritura de archivos Excel |
+| `psutil` | ≥5.9 | Detección de RAM (batch size automático) |
+
+### Entrenamiento (`training/requirements-train.txt`)
+
+Además agrega `scikit-learn` (split estratificado) y `pillow`.
