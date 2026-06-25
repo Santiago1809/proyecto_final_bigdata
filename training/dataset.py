@@ -27,13 +27,23 @@ from training.config import Config
 
 
 def _discover_classes(data_dir: str) -> tuple[list[str], dict[str, int]]:
-    """Scan *data_dir* for subdirectories and return sorted class info."""
+    """Scan *data_dir* for subdirectories and return class info.
+
+    The class order follows :attr:`Config.CLASS_NAMES` to stay aligned
+    with :class:`src.vision.classifier_tf.BottleType` (NONE=0, POOL_VERDE=1,
+    HATSU_MORADO=2).
+    """
     data_path = Path(data_dir)
-    class_names = sorted(d.name for d in data_path.iterdir() if d.is_dir())
+    available = {d.name for d in data_path.iterdir() if d.is_dir()}
+
+    # Use Config.CLASS_NAMES order so class indices match BottleType
+    expected = Config().CLASS_NAMES
+    class_names = [name for name in expected if name in available]
+
     if not class_names:
         raise ValueError(
-            f"No subdirectories found in {data_dir!r}. "
-            "Expected one folder per class."
+            f"No matching class subdirectories found in {data_dir!r}. "
+            f"Expected at least one of: {Config.CLASS_NAMES}"
         )
     class_to_idx = {name: i for i, name in enumerate(class_names)}
     return class_names, class_to_idx
@@ -66,20 +76,46 @@ def _collect_files(
 
 
 def _decode_resize(image_path: str, img_size: int) -> tf.Tensor:
-    """Read, decode (JPEG / PNG), and resize a single image to [0, 1]."""
+    """Read, decode (JPEG / PNG), and resize.
+
+    Returns raw float32 pixels in [0, 255] — MobileNetV2 has its own
+    normalisation built in (``true_divide / 128 → subtract 1``).
+    """
     image = tf.io.read_file(image_path)
     image = tf.image.decode_jpeg(image, channels=3)
     image = tf.image.resize(image, [img_size, img_size])
-    return tf.cast(image, tf.float32) / 255.0
+    return tf.cast(image, tf.float32)
+
+
+def _color_jitter(image: tf.Tensor, label: int) -> tuple[tf.Tensor, int]:
+    """Randomly adjust hue and saturation to reduce colour dependency.
+
+    Operates on the raw ``[0, 255]`` range — normalises to ``[0, 1]``,
+    applies the jitter, and scales back.  Only applied during training.
+    """
+    norm = image / 255.0
+    hue = tf.image.random_hue(norm, max_delta=0.15)
+    sat = tf.image.random_saturation(hue, lower=0.5, upper=1.5)
+    return sat * 255.0, label
 
 
 def _build_augmentation() -> tf.keras.Sequential:
-    """On-device augmentation pipeline applied only to the training set."""
+    """On-device augmentation pipeline applied only to the training set.
+
+    Includes geometric transforms (flip, rotation, zoom, shear,
+    translation) plus colour perturbation (brightness, contrast, hue,
+    saturation) to make the model invariant to lighting conditions and
+    bottle tint variations.
+    """
     return tf.keras.Sequential([
         tf.keras.layers.RandomFlip("horizontal"),
         tf.keras.layers.RandomRotation(0.1),
         tf.keras.layers.RandomZoom(0.1),
-        tf.keras.layers.RandomBrightness(0.1),
+        tf.keras.layers.RandomShear(0.15),
+        tf.keras.layers.RandomTranslation(height_factor=0.10, width_factor=0.10),
+        tf.keras.layers.RandomBrightness(0.2),
+        tf.keras.layers.RandomContrast(0.2),
+        tf.keras.layers.RandomGrayscale(factor=0.2),
     ])
 
 
@@ -91,7 +127,7 @@ def _build_augmentation() -> tf.keras.Sequential:
 def load_dataset(
     data_dir: str,
     config: Config = Config(),
-) -> tuple[tf.data.Dataset, tf.data.Dataset, list[str]]:
+) -> tuple[tf.data.Dataset, tf.data.Dataset, list[str], list[int]]:
     """Load images from class subdirectories with a stratified train/val split.
 
     Args:
@@ -99,15 +135,17 @@ def load_dataset(
         config: Configuration object (or defaults).
 
     Returns:
-        ``(train_ds, val_ds, class_names)`` where both datasets yield
-        ``(image, label)`` tuples.  ``class_names`` preserves the index
-        order for mapping predictions back to labels.
+        ``(train_ds, val_ds, class_names, class_counts)`` where both
+        datasets yield ``(image, label)`` tuples.  ``class_names``
+        preserves the index order for mapping predictions back to labels.
+        ``class_counts`` has the number of images per class.
 
     Raises:
         ValueError: If *data_dir* has no subdirectories or no images.
     """
     class_names, class_to_idx = _discover_classes(data_dir)
     file_paths, labels = _collect_files(data_dir, class_names, class_to_idx)
+    class_counts = [labels.count(i) for i in range(len(class_names))]
 
     # Stratified train / validation split
     train_paths, val_paths, train_labels, val_labels = train_test_split(
@@ -147,15 +185,16 @@ def load_dataset(
 
             def _augment(image: tf.Tensor, label: int) -> tuple[tf.Tensor, int]:
                 augmented = aug_pipeline(image, training=True)
-                # RandomBrightness can push values outside [0, 1]; clip back
-                augmented = tf.clip_by_value(augmented, 0.0, 1.0)
+                # Brightness/contrast can push values outside [0, 255]; clip back
+                augmented = tf.clip_by_value(augmented, 0.0, 255.0)
                 return augmented, label
 
             ds = ds.map(_augment, num_parallel_calls=AUTOTUNE)
+            ds = ds.map(_color_jitter, num_parallel_calls=AUTOTUNE)
 
         return ds.batch(batch_size).prefetch(AUTOTUNE)
 
     train_ds = _make_tf_ds(train_paths, train_labels, augment=True)
     val_ds = _make_tf_ds(val_paths, val_labels, augment=False)
 
-    return train_ds, val_ds, class_names
+    return train_ds, val_ds, class_names, class_counts

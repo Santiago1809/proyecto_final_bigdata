@@ -21,8 +21,9 @@ BACKBONE_LAYER_NAME = "mobilenetv2_1.00_224"
 def build_mobilenetv2(
     img_size: int = 224,
     num_classes: int = 3,
-    dropout_rate: float = 0.2,
-    dense_units: int = 128,
+    dropout_rate: float = 0.3,
+    dense_units: int = 256,
+    dense_units_2: int = 128,
     backbone_trainable: bool = False,
 ) -> tf.keras.Model:
     """Build a MobileNetV2 backbone with a custom classification head.
@@ -34,7 +35,8 @@ def build_mobilenetv2(
         img_size: Input image size (square).
         num_classes: Number of output classes (softmax units).
         dropout_rate: Dropout rate before the final dense layer.
-        dense_units: Units in the penultimate ``ReLU`` dense layer.
+        dense_units: Units in the first ``ReLU`` dense layer.
+        dense_units_2: Units in the second ``ReLU`` dense layer.
         backbone_trainable: Whether the entire backbone is trainable
             from the start (default ``False``).
 
@@ -59,6 +61,7 @@ def build_mobilenetv2(
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dense(dense_units, activation="relu")(x)
     x = tf.keras.layers.Dropout(dropout_rate)(x)
+    x = tf.keras.layers.Dense(dense_units_2, activation="relu")(x)
     outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
 
     return tf.keras.Model(inputs=inputs, outputs=outputs)

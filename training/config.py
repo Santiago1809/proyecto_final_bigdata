@@ -31,10 +31,13 @@ class Config:
     # ------------------------------------------------------------------
     # Classification head
     # ------------------------------------------------------------------
-    DENSE_UNITS: int = 128
-    """Number of units in the penultimate dense layer."""
+    DENSE_UNITS: int = 256
+    """Number of units in the first dense layer of the classification head."""
 
-    DROPOUT_RATE: float = 0.2
+    DENSE_UNITS_2: int = 128
+    """Number of units in the second dense layer of the classification head."""
+
+    DROPOUT_RATE: float = 0.3
     """Dropout rate before the final softmax layer."""
 
     # ------------------------------------------------------------------
@@ -55,7 +58,7 @@ class Config:
     FROZEN_EPOCHS: int = 20
     """Maximum epochs training with a frozen backbone."""
 
-    FROZEN_LR: float = 1e-3
+    FROZEN_LR: float = 5e-4
     """Learning rate for the frozen-backbone phase."""
 
     # ------------------------------------------------------------------
