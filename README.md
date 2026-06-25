@@ -1,6 +1,6 @@
 # Bottle Detection — Clasificador de Envases
 
-Sistema de visión artificial que detecta y clasifica botellas plásticas en tiempo real usando **TensorFlow + MobileNetV2** con una cámara USB, y controla un **ESP32** con LEDs, servomotor y zumbador.
+Sistema de visión artificial que detecta y clasifica botellas plásticas en tiempo real usando **TensorFlow + MobileNetV2** con una webcam del PC, y controla un **ESP32** con LEDs, servomotor y zumbador.
 
 Clasifica en 3 clases: `no_bottle` (fondo), `pool_verde`, `hatsu_morado`.
 
@@ -11,7 +11,7 @@ Clasifica en 3 clases: `no_bottle` (fondo), `pool_verde`, `hatsu_morado`.
 ## Arquitectura
 
 ```
-Cámara USB ──> Python Host ──serial──> ESP32
+Webcam PC ──> Python Host ──serial──> ESP32
                   │                    │
             ┌─────┴─────┐        ┌─────┴─────┐
             │MobileNetV2 │        │LEDs G+R   │
@@ -59,7 +59,7 @@ python -m src.vision.main --rejection-sigma 4.0
 
 | Flag | Default | Descripción |
 |------|---------|-------------|
-| `--camera` | `0` | Índice de cámara USB |
+| `--camera` | `0` | Índice de webcam del PC |
 | `--threshold` | `0.7` | Confianza mínima [0-1] |
 | `--rejection-sigma` | `6.0` | Sensibilidad del rechazo OOD (0 = desactivado) |
 | `--test` | — | Sin conexión serial |

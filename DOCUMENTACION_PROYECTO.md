@@ -34,7 +34,7 @@
 
 ## 1. Resumen del Proyecto
 
-Sistema de **visión por computadora** que detecta envases plásticos en tiempo real usando una cámara USB y un clasificador basado en **MobileNetV2** (TensorFlow). Cuando detecta una botella, envía comandos JSON por puerto serie a un **ESP32** que controla:
+Sistema de **visión por computadora** que detecta envases plásticos en tiempo real usando la webcam del PC y un clasificador basado en **MobileNetV2** (TensorFlow). Cuando detecta una botella, envía comandos JSON por puerto serie a un **ESP32** que controla:
 
 - **LED verde** cuando hay una botella detectada
 - **LED rojo** cuando no hay botella
@@ -60,8 +60,8 @@ Incluye un pipeline completo de **entrenamiento** con transfer learning (MobileN
 │                     PC (Linux)                           │
 │                                                          │
 │  ┌──────────┐   ┌──────────────┐   ┌─────────────────┐  │
-│  │ Cámara   │   │  main.py     │   │  protocol/       │  │
-│  │ USB      │──>│  (orquesta)  │──>│  message.py      │  │
+│  │ Webcam   │   │  main.py     │   │  protocol/       │  │
+│  │ del PC   │──>│  (orquesta)  │──>│  message.py      │  │
 │  │          │   │              │   │  encode → JSON   │  │
 │  │ 640×480  │   │  ┌─────────┐ │   └────────┬────────┘  │
 │  │ BGR      │   │  │classifier│ │            │           │
@@ -91,7 +91,7 @@ Incluye un pipeline completo de **entrenamiento** con transfer learning (MobileN
 
 **Flujo de datos en producción:**
 
-1. `CameraCapture` abre la cámara USB y entrega frames 640×480 BGR
+1. `CameraCapture` abre la webcam del PC y entrega frames 640×480 BGR
 2. `BottleTFClassifier.predict(frame)` preprocesa la imagen (224×224, RGB), la pasa por MobileNetV2, obtiene probabilidades softmax (3 clases)
 3. Si la confianza supera el threshold (ej: 0.7) y no es rechazada por distancia de características, se considera detección positiva
 4. `encode()` en `message.py` arma un JSON compacto: `{"b":1,"t":1,"s":90}\n`
@@ -107,7 +107,7 @@ Incluye un pipeline completo de **entrenamiento** con transfer learning (MobileN
 /
 ├── .gitignore                        # Archivos ignorados por git
 ├── AGENTS.md                         # Instrucciones para el asistente AI
-├── README.md                         # Documentación de inicio rápido (desactualizada)
+├── README.md                         # Documentación de inicio rápido
 ├── requirements.txt                  # Dependencias de producción
 ├── registro_envases.xlsx             # Bitácora de detecciones (se genera automáticamente)
 │
@@ -190,7 +190,7 @@ python -m src.vision.main --inference-skip 1        # Inferencia en cada frame (
 | `--test` | flag | `False` | Modo test: no conecta serial, no muestra ventana (a menos que se combine con `--display`). |
 | `--display` | flag | `False` | Fuerza la ventana de previsualización (por defecto activa en modo normal, inactiva en `--test`). |
 | `--no-display` | flag | `False` | Deshabilita la ventana de previsualización explícitamente. |
-| `--camera` | int | `0` | Índice del dispositivo de cámara (0 = primera cámara USB). |
+| `--camera` | int | `0` | Índice del dispositivo de cámara (0 = primera webcam del PC). |
 | `--inference-skip` | int | `2` | Ejecuta inferencia cada N frames. `2` = la inferencia corre a la mitad de FPS que el display. |
 | `--model` | str | `models/bottle_classifier_latest.keras` | Ruta al modelo `.keras` entrenado. |
 
@@ -1026,7 +1026,7 @@ python -m unittest tests.test_classifier    # Solo clasificador
 | **LEDs** | Verde y Rojo, 5mm, 20mA, con resistencias 220Ω limitadoras de corriente |
 | **Servomotor** | SG90 (micro servo), 5V, 0-180°, señal PWM 50 Hz |
 | **Buzzer** | Zumbador activo (genera tono propio con HIGH), 3.3-5V |
-| **Cámara** | Cámara USB compatible con V4L2 (Linux) |
+| **Cámara** | Webcam del PC compatible con V4L2 (Linux) |
 | **Conexión** | USB entre PC y ESP32 (alimentación + datos serial) |
 
 ### Advertencias
@@ -1122,7 +1122,7 @@ python -m unittest tests.test_classifier    # Solo clasificador
 
 ### Cámara
 
-- Cámara USB compatible con **V4L2** en Linux
+- Webcam del PC compatible con **V4L2** en Linux
 - Resolución mínima: 640×480 (la usa el sistema)
 - Sin requisitos especiales de driver
 
