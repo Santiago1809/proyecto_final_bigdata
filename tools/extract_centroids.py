@@ -34,6 +34,8 @@ from src.vision.preprocess import to_tf_input
 
 _LOG = logging.getLogger("extract-centroids")
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+_IMG_SIZE = 224
+_BATCH_SIZE = 32  # default batch for feature extraction
 
 # ---------------------------------------------------------------------------
 # Dataset helpers
@@ -55,14 +57,31 @@ def _discover_classes(data_dir: str) -> list[tuple[str, list[str]]]:
     return classes
 
 
-def _load_and_preprocess(path: str) -> np.ndarray:
-    """Read an image from disk and preprocess it like the classifier does."""
-    import cv2
+def _build_feature_dataset(
+    image_paths: list[str],
+    batch_size: int,
+) -> tf.data.Dataset:
+    """Build a batched ``tf.data.Dataset`` that yields preprocessed images.
 
-    frame = cv2.imread(path)
-    if frame is None:
-        raise ValueError(f"Failed to read {path}")
-    return to_tf_input(frame)  # (224, 224, 3) float32 [0, 255]
+    The pipeline:
+    file path → read file → decode JPEG/PNG → resize → BGR→RGB → batch
+    """
+    def _decode_and_preprocess(path: str) -> tf.Tensor:
+        image = tf.io.read_file(path)
+        image = tf.image.decode_image(image, channels=3, expand_animations=False)
+        image.set_shape([None, None, 3])
+        image = tf.image.resize(image, [_IMG_SIZE, _IMG_SIZE])
+        # Match the classifier's preprocessing: resize + BGR→RGB
+        # but to_tf_input expects BGR. Since decode_image gives RGB,
+        # we keep RGB as-is for the TF pipeline.
+        return tf.cast(image, tf.float32)
+
+    AUTOTUNE = tf.data.AUTOTUNE
+    ds = tf.data.Dataset.from_tensor_slices(image_paths)
+    ds = ds.map(_decode_and_preprocess, num_parallel_calls=AUTOTUNE)
+    ds = ds.batch(batch_size)
+    ds = ds.prefetch(AUTOTUNE)
+    return ds
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +122,7 @@ def extract_centroids(
     model_path: str,
     data_dir: str,
     sigma: float = 3.0,
+    batch_size: int = _BATCH_SIZE,
 ) -> dict:
     """Extract features and compute centroids for each class.
 
@@ -110,6 +130,7 @@ def extract_centroids(
         model_path: Path to the trained ``.keras`` model file.
         data_dir: Root directory with class subdirectories.
         sigma: Number of standard deviations for the rejection threshold.
+        batch_size: Batch size for TF feature extraction (default 32).
 
     Returns:
         A dict mapping class index ``str`` → centroids info::
@@ -135,19 +156,19 @@ def extract_centroids(
 
     class_to_idx = {name: i for i, (name, _) in enumerate(classes)}
 
-    # ---- Extract features ----
+    # ---- Extract features (batched) ----
     all_features: dict[int, list[np.ndarray]] = {i: [] for i in range(len(classes))}
 
     for cls_name, image_paths in classes:
         cls_idx = class_to_idx[cls_name]
-        _LOG.info("Extracting features for %s (%d images) ...", cls_name, len(image_paths))
-        for path in image_paths:
-            try:
-                tensor = _load_and_preprocess(path)
-                feat = feature_model(tensor[None, ...], training=False).numpy()[0]
+        _LOG.info("Extracting features for %s (%d images, batch=%d) ...", cls_name, len(image_paths), batch_size)
+        ds = _build_feature_dataset(image_paths, batch_size)
+        for batch in ds:
+            # The model expects RGB input with preprocess_input normalization
+            # (true_divide / 128 → subtract 1). The model has this built in.
+            feats = feature_model(batch, training=False).numpy()  # (B, 128)
+            for feat in feats:
                 all_features[cls_idx].append(feat)
-            except Exception as exc:
-                _LOG.warning("Skipping %s: %s", path, exc)
 
     # ---- Compute centroids ----
     result: dict[str, dict] = {}
@@ -207,6 +228,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Number of standard deviations for rejection threshold (default: 3.0)",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=_BATCH_SIZE,
+        help=f"Batch size for feature extraction (default: {_BATCH_SIZE})",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Output JSON path (default: <model_dir>/<model_stem>_centroids.json)",
@@ -223,6 +250,7 @@ def main() -> None:
         model_path=args.model,
         data_dir=args.data_dir,
         sigma=args.sigma,
+        batch_size=args.batch_size,
     )
 
     # Determine output path
