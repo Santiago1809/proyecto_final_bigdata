@@ -36,9 +36,9 @@
 
 Sistema de **visión por computadora** que detecta envases plásticos en tiempo real usando la webcam del PC y un clasificador basado en **MobileNetV2** (TensorFlow). Cuando detecta una botella, envía comandos JSON por puerto serie a un **ESP32** que controla:
 
-- **LED verde** cuando hay una botella detectada
+- **LED Azul** cuando hay una botella detectada
 - **LED rojo** cuando no hay botella
-- **Servomotor** que se posiciona según el tipo de botella
+- **Servomotor** que se posiciona segun si detecta una botella o no
 - **Zumbador** que emite un pitido breve al detectar
 
 El sistema clasifica en **3 clases**:
