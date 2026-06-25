@@ -96,7 +96,7 @@ Incluye un pipeline completo de **entrenamiento** con transfer learning (MobileN
 3. Si la confianza supera el threshold (ej: 0.7) y no es rechazada por distancia de características, se considera detección positiva
 4. `encode()` en `message.py` arma un JSON compacto: `{"b":1,"t":1,"s":90}\n`
 5. Se envía por serial al ESP32 a 9600 baud
-6. El ESP32 parsea el JSON, enciende LED verde, posiciona el servo a 90°, suena el buzzer 200ms
+6. El ESP32 parsea el JSON, enciende LED Azul, posiciona el servo a 90°, suena el buzzer 200ms
 7. `ExcelLogger` registra cada detección en un archivo Excel (`registro_envases.xlsx`)
 
 ---
