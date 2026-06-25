@@ -1,3 +1,11 @@
 .atl/
 .pytest_cache/
 __pycache__/
+# Training data (images, not code)
+training/data/
+
+# Trained models (binaries, reproducible)
+models/*.keras
+models/*.h5
+models/*.caffemodel
+models/*.prototxt

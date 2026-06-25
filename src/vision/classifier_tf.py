@@ -90,7 +90,7 @@ class BottleTFClassifier:
             raise ValueError(f"Threshold must be in [0, 1], got {threshold}")
 
         self._threshold = threshold
-        self._model = tf.keras.models.load_model(model_path)
+        self._model = self._load_model_safe(model_path)
         self._forward = self._build_forward()
 
         logger.info(
@@ -99,6 +99,19 @@ class BottleTFClassifier:
             threshold,
             self._xla_enabled,
         )
+
+    # ------------------------------------------------------------------
+    # Model loading
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_model_safe(model_path: str) -> tf.keras.Model:
+        """Load a Keras model from a ``.keras`` file.
+
+        MobileNetV2 layers can have serialisation quirks with the legacy
+        H5 format; the preferred format is the modern ``.keras``.
+        """
+        return tf.keras.models.load_model(model_path)
 
     # ------------------------------------------------------------------
     # Properties

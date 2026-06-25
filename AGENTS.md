@@ -3,11 +3,9 @@
 ## Entry point
 
 ```bash
-python -m src.vision.main                        # OpenCV DNN (default)
-python -m src.vision.main --tf                    # TF classifier
-python -m src.vision.main --tf --model path/to/model.h5
+python -m src.vision.main                        # TF classifier (default)
+python -m src.vision.main --model path/to/model.keras
 python -m src.vision.main --test                  # no serial — logs only
-python -m src.vision.main --tf --test             # TF test mode
 python -m src.vision.main --camera 2 --threshold 0.75
 ```
 
@@ -22,8 +20,7 @@ pip install -r requirements.txt
 ```
 
 Model files:
-- **OpenCV DNN**: `models/MobileNetSSD_deploy.caffemodel` + `models/MobileNetSSD_deploy.prototxt` — NOT in the repo. Download from OpenCV model zoo.
-- **TF classifier** (`--tf` flag): `models/bottle_classifier.h5` — produced by `training/train.py`. NOT in the repo.
+- **TF classifier**: `models/bottle_classifier_latest.keras` — produced by `training/train.py`. NOT in the repo.
 
 Tests mock the DNN net and TF model — no model files needed.
 
@@ -37,7 +34,7 @@ python -m unittest tests.test_message       # single file
 python -m unittest tests.test_classifier
 ```
 
-Classifier tests mock `cv2.dnn.Net` and `tf.keras.models.load_model` — no camera or model files required.
+Classifier tests mock `tf.keras.models.load_model` — no camera or model files required.
 
 ## Architecture
 
@@ -48,17 +45,17 @@ src/
 ├── vision/          # host-side Python vision pipeline
 │   ├── main.py      # → orchestrator entry point
 │   ├── capture.py   # → OpenCV VideoCapture wrapper
-│   ├── preprocess.py# → resize + DNN blob + TF preprocess
-│   ├── classifier.py# → MobileNet SSD (VOC class 5, bottle) [legacy]
-│   └── classifier_tf.py# → 3-class TF classifier (Pool/Hatsu/No bottle) [new]
+│   ├── preprocess.py# → TF input preprocessing only
+│   └── classifier_tf.py# → 3-class TF classifier (Pool/Hatsu/No bottle)
 ├── protocol/        # shared serial protocol
 │   └── message.py   # → {"b":1,"t":1,"s":90}\n encode/decode
 └── hardware/esp32/  # Arduino sketch
     ├── firmware.ino
     ├── led_control.h
-    └── servo_sweep.h
+    ├── servo_sweep.h
+    └── buzzer_control.h
 
-models/              # place .caffemodel + .prototxt here (not committed)
+models/              # place TF model files here (not committed)
 training/            # TF training pipeline (standalone)
 ├── config.py
 ├── dataset.py
@@ -82,6 +79,7 @@ No ArduinoJson dependency — the parser hand-walks `strstr` for `"b"` and reads
 | Green LED | GPIO 26 + 220Ω | to GND |
 | Red LED   | GPIO 27 + 220Ω | to GND |
 | Servo SG90| GPIO 13 signal | external 5V supply required |
+| Buzzer    | GPIO 12 signal | active buzzer (GND to ESP32 GND) |
 
 ## Quirks & constraints
 
