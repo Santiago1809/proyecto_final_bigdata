@@ -9,7 +9,7 @@ Optional arguments::
 
     python training/train.py --data-dir ./data            \\
         --epochs-frozen 15 --epochs-finetune 10           \\
-        --batch-size 16 --lr-frozen 1e-3 --lr-finetune 1e-5 \\
+        --lr-frozen 1e-3 --lr-finetune 1e-5 \\
         --model-dir ./models
 """
 
@@ -104,12 +104,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"Directory to save trained models (default: {Config.MODEL_SAVE_DIR})",
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=Config.BATCH_SIZE,
-        help=f"Batch size (default: {Config.BATCH_SIZE})",
-    )
-    parser.add_argument(
         "--epochs-frozen",
         type=int,
         default=Config.FROZEN_EPOCHS,
@@ -175,7 +169,6 @@ def train(args: argparse.Namespace) -> str:
         data_dir=args.data_dir,
         config=Config(
             IMG_SIZE=args.img_size,
-            BATCH_SIZE=args.batch_size,
         ),
     )
     _LOG.info("Classes found: %s", class_names)

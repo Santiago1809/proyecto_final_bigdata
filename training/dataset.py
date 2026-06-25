@@ -179,6 +179,10 @@ def load_dataset(
 
         ds = ds.map(_decode, num_parallel_calls=AUTOTUNE)
 
+        # Cache decoded/resized images in RAM (training only — multiple epochs)
+        if augment:
+            ds = ds.cache()
+
         # Augment only the training set
         if augment:
             aug_pipeline = _build_augmentation()
